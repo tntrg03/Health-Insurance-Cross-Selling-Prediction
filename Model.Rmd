@@ -1,0 +1,454 @@
+---
+title: "ĐỀ ÁN-Health Insurance Cross Sell Prediction"
+author: "Truong Ngoc Thuy Trang_11217004"
+date: "2024-03-02"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Nhập dữ liệu
+```{r}
+library(readr)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(forcats)
+library(ggpubr)
+library(grid)
+library(gridExtra)
+library(forcats)
+library(plotly)
+library(Ecdat)
+library(gganimate)
+library(janitor)
+library(gtsummary)
+library(reshape2)
+library(summarytools)
+library(e1071)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(partykit)
+library(ROCR)
+train <- read.csv("E:/Đề án/Data/train.csv")
+#test <- read.csv("E:/Đề án/Data/test.csv")
+#sample_submission <- read.csv("E:/Đề án/Data/sample_submission.csv")
+str(train)
+```
+
+
+```{r}
+library(sqldf)
+train_copy <- sqldf("select * from train")
+
+#Control Structures
+train_copy$Gender <- ifelse(train_copy$Gender == "Male", 1, 0)
+train_copy$Vehicle_Damage <- ifelse(train_copy$Vehicle_Damage == "Yes", 1, 0)
+train_copy$Vehicle_Age <- ifelse(train_copy$Vehicle_Age == "> 2 Years", 2, ifelse(train_copy$Vehicle_Age == "1-2 Year", 1, 0))
+train_copy$Gender=as.factor(train_copy$Gender)
+train_copy$Driving_License=as.factor(train_copy$Driving_License)
+train_copy$Region_Code=as.factor(train_copy$Region_Code)
+train_copy$Previously_Insured=as.factor(train_copy$Previously_Insured)
+train_copy$Vehicle_Age=as.factor(train_copy$Vehicle_Age)
+train_copy$Vehicle_Damage=as.factor(train_copy$Vehicle_Damage)
+train_copy$Policy_Sales_Channel=as.factor(train_copy$Policy_Sales_Channel)
+train_copy$Response=as.factor(train_copy$Response)
+str(train_copy)
+```
+#Kiểm tra cấu trúc và giá trị NAs
+```{r}
+
+dim(train_copy)
+glimpse(train_copy)
+summary(train_copy)
+
+```
+##Kiểm tra outlier
+### Visual kiểm tra outlier
+```{r echo=FALSE, warning=FALSE, , message=FALSE}
+a<-ggplot(train_copy)+geom_boxplot(aes(Age),fill="darkblue")
+b<-ggplot(train_copy)+geom_boxplot(aes(Annual_Premium),fill="seagreen")
+c<-ggplot(train_copy)+geom_boxplot(aes(Vintage),fill="black")
+
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(grid)
+library(gridExtra)
+library(cowplot)
+plot_grid(a,b,c)
+ggplot(train)+geom_histogram(aes(train$Annual_Premium),fill="skyblue",color="black")
+```
+```{r include=FALSE}
+library(dplyr)
+q1<-quantile(train_copy$Annual_Premium,0.25)
+q3<-quantile(train_copy$Annual_Premium,0.75)
+IQR<-q3-q1
+nn<-1.5*IQR
+outlier<-train_copy%>%filter(Annual_Premium<(q1-nn)|Annual_Premium>(q3+nn))
+outlier
+train_copy$Annual_Premium<-replace(train_copy$Annual_Premium,train_copy$Annual_Premium<(q1-nn)|train_copy$Annual_Premium>(q3+nn),mean(train_copy$Annual_Premium))
+
+```
+
+```{r}
+ggplot(train_copy)+geom_boxplot(aes(Annual_Premium),fill="seagreen")
+ggplot(train_copy)+geom_histogram(aes(train_copy$Annual_Premium),fill="skyblue",color="black")
+```
+
+
+```{r}
+dat=data.frame(train_copy$Age,train_copy$Annual_Premium,train_copy$Vintage)
+cor(dat)
+```
+
+
+
+#Data Manipulation
+
+```{r}
+library(tidyverse)
+library(dplyr)
+Count_Sales_Channel <- train %>% group_by(Policy_Sales_Channel) %>% summarise(count = n()) %>% arrange(desc(count))
+Count_Sales_Channel%>%mutate(rate=(count/381109)*100)
+```
+```{r}
+mean_AP <- train %>% group_by(Vehicle_Damage) %>% summarise(mean = mean(Annual_Premium))
+mean_AP
+```
+- Phí bảo hiểm trung bình phải nộp hàng năm cho cả nhóm xe bị hư hỏng và không bị hư hỏng là tương tự nhau
+
+```{r}
+library(ggthemes)
+
+Age_Premium_Plot <- ggplot(data = train) + geom_point(mapping = aes(x = Age, y = Annual_Premium)) + labs(x="Age",y="Annual Premium") + theme_wsj() + ggtitle("Age vs Annual Premium")
+Age_Premium_Plot
+```
+- Không có tương quan đáng kể giữa mối quan hệ tuổi của một khách hàng và số tiền bảo hiểm họ phải trả hàng năm
+
+```{r}
+ggplot(train, aes(Age,fill=Vehicle_Damage))+ geom_bar(stat="count",position='dodge')+ ggtitle("Age vs Vehicle Damage")
+```
+
+- Những người ở độ tuổi 20-30, tỷ lệ xe không hư hỏng cao hơn xe hư hỏng. Trong khi ở nhóm từ 35-80 thì ngược lại
+
+```{r}
+ggplot(train, aes(Gender,fill=Vehicle_Damage))+ geom_bar(stat="count",position='dodge', width = 0.5) + labs(title="Gender vs Vehicle Damage") + theme_bw() + scale_fill_brewer()
+```
+```{r}
+ggplot(train, mapping = aes(x = Response, y = Vehicle_Damage))+ theme_stata() + ggtitle("Response count vs Vehicle Damage") + geom_col()
+```
+```{r}
+ggplot(train, aes(Response,fill=Vehicle_Age))+ geom_bar(stat="count",position='dodge', width = 0.5) +labs(title="Vehicle Age vs Response count") + theme_bw()+ scale_fill_brewer(palette="Set5")
+```
+
+# Model
+## Chia tập dữ liệu thành tập train và test
+```{r}
+set.seed(123)
+train_idx <- sample(nrow(train_copy), .70*nrow(train_copy))
+
+ins_train <- train[train_idx,]
+ins_test <- train[-train_idx,]
+
+```
+
+```{r}
+ins_train$Gender <- ifelse(ins_train$Gender == "Male", 1, 0)
+ins_train$Vehicle_Damage <- ifelse(ins_train$Vehicle_Damage == "Yes", 1, 0)
+ins_train$Vehicle_Age <- ifelse(ins_train$Vehicle_Age == "> 2 Years", 2, ifelse(ins_train$Vehicle_Age == "1-2 Year", 1, 0))
+ins_train$Gender=as.factor(ins_train$Gender)
+ins_train$Driving_License=as.factor(ins_train$Driving_License)
+
+ins_train$Previously_Insured=as.factor(ins_train$Previously_Insured)
+ins_train$Vehicle_Age=as.factor(ins_train$Vehicle_Age)
+ins_train$Vehicle_Damage=as.factor(ins_train$Vehicle_Damage)
+
+ins_train$Response=as.factor(ins_train$Response)
+str(ins_train)
+```
+```{r}
+ins_test$Gender <- ifelse(ins_test$Gender == "Male", 1, 0)
+ins_test$Vehicle_Damage <- ifelse(ins_test$Vehicle_Damage == "Yes", 1, 0)
+ins_test$Vehicle_Age <- ifelse(ins_test$Vehicle_Age == "> 2 Years", 2, ifelse(ins_test$Vehicle_Age == "1-2 Year", 1, 0))
+ins_test$Gender=as.factor(ins_test$Gender)
+ins_test$Driving_License=as.factor(ins_test$Driving_License)
+
+ins_test$Previously_Insured=as.factor(ins_test$Previously_Insured)
+ins_test$Vehicle_Age=as.factor(ins_test$Vehicle_Age)
+ins_test$Vehicle_Damage=as.factor(ins_test$Vehicle_Damage)
+
+ins_test$Response=as.factor(ins_test$Response)
+str(ins_test)
+```
+
+## Logistic Regression
+```{r}
+ins_logreg <- glm(Response ~.,family=binomial,data = ins_train)
+summary(ins_logreg)
+```
+
+- 3 biến id, Region_code, Vintage không có ý nghĩa thống kê ở mức ý nghĩa 5%
+```{r}
+# điều chỉnh mô hình
+ins_logreg_final <- glm(Response ~ Gender+Age+Driving_License+Previously_Insured
+                  +Vehicle_Age+Vehicle_Damage+Annual_Premium+Policy_Sales_Channel,family=binomial,data = ins_train)
+summary(ins_logreg_final)
+```
+```{r}
+testing_ins <- predict(ins_logreg_final, ins_test, type = "response")
+hist(testing_ins,col = "seagreen")
+
+```
+Từ biểu đồ trên, chúng ta có thể thấy rằng ngưỡng xác suất dự đoán để dự đoán liệu một cá nhân có mua bảo hiểm xe cộ hay không cần phải nhỏ hơn 0,50, vì không có xác suất dự đoán nào lớn hơn ~ 0,45. Đối với nghiên cứu điển hình này, chúng tôi sẽ dự đoán rằng bất kỳ cá nhân nào có xác suất phản hồi dự đoán lớn hơn 0,25 đều được dự đoán là người mua.
+
+```{r}
+Y_hat_mod2 <- as.numeric(testing_ins > 0.25)
+table(ins_test$Response, Y_hat_mod2, dnn = c("Actual", "Predicted"))
+accuracy <- mean(ins_test$Response == Y_hat_mod2)
+accuracy
+```
+## Random Forest
+```{r}
+library(randomForest)
+ins_train$Response <- as.factor(ins_train$Response)
+ins_test$Response <- as.factor(ins_test$Response)
+set.seed(500)
+RF_Model = randomForest(Response~.,data=ins_train,ntree=100)
+predicted_response = predict(RF_Model,ins_test)
+library(caret)
+library(corrplot)
+conf=confusionMatrix(predicted_response,ins_test$Response)
+ggplot(data = ins_test,aes(x=as.factor(Response),fill=predicted_response))+geom_bar()+scale_color_manual(values = c("seagreen","black"))+labs(x="Actual",y="Predicted",fill="Predicted")+theme_minimal()
+ins_test$predicted_response = predicted_response
+```
+```{r}
+CFM1 = table(ins_test$Response,ins_test$predicted_response)
+CFM1
+Accuracy_Random_Forest = sum(diag(CFM1)/sum(CFM1))
+Accuracy_Random_Forest
+```
+
+##Decision Trees
+
+
+```{r}
+asuransi_tree <- ctree(formula = Response ~ .,
+                       data = ins_train,control=ctree_control(mincriterion=0.95,minsplit=30, minbucket=2))
+
+
+plot(asuransi_tree, type = "simple")
+```
+
+
+```{r}
+# Dự đoán
+dtree_class <- predict(asuransi_tree, ins_test, type = "response")
+
+table(dtree_class, ins_test$Response)
+accuracy <- mean(ins_test$Response == dtree_class)
+accuracy
+```
+
+
+
+# Đánh giá lựa chọn mô hình
+## Logistic regression
+```{r}
+library(pROC)
+par(pty ="s")
+auc_lm <- roc(ins_test$Response,testing_ins, plot = TRUE, legacy.axes= TRUE, 
+    percent = TRUE, xlab = "False Positive %", ylab = "True Positive %", 
+    col="#377eb8", lwd=4, print.auc = TRUE)
+```
+## Random Forest
+```{r}
+roc.df <- data.frame(
+  tpp = auc_lm$sensitivities*100,
+  fpp = (1 - auc_lm$specificities)*100,
+  thresholds = auc_lm$thresholds
+)
+
+tradeoff <- roc.df[roc.df$tpp >80 & roc.df$tpp <100, ]
+head(tradeoff)
+```
+```{r}
+auc_rf <- roc(ins_train$Response,RF_Model$votes[,1], plot = TRUE, legacy.axes= TRUE, 
+    percent = TRUE, xlab = "False Positive %", ylab = "True Positive %", 
+    col="#4daf4a", lwd=4, print.auc = TRUE)
+```
+```{r}
+roc(ins_train$Response,ins_logreg_final$fitted.values, plot = TRUE, legacy.axes= TRUE, 
+    percent = TRUE, xlab = "False Positive %", ylab = "True Positive %", 
+    col="#377eb8", lwd=4, print.auc = TRUE)
+plot.roc(ins_train$Response,RF_Model$votes[,1], percent = TRUE, 
+         col="#4daf4a", lwd=4, print.auc = TRUE, add=TRUE, print.auc.y=40)
+```
+##DTree
+```{r}
+Dtree_predprob <- predict(asuransi_tree, ins_test, type = "prob")
+
+
+Dtree_roc <- prediction(predictions = Dtree_predprob[,2],
+                        labels=as.numeric(ins_test$Response == "1"))
+
+
+Dtree_perf <- performance(prediction.obj = Dtree_roc,
+                    measure = "tpr", # tpr = true positive rate
+                    x.measure = "fpr") #fpr = false positive rate
+                    
+
+plot(Dtree_perf)
+abline(0,1, lty = 2)
+auc <- performance(prediction.obj = Dtree_roc, 
+                   measure = "auc")
+auc@y.values
+```
+
+#resampling
+```{r}
+data_train=downSample(x=ins_train%>%select(-Response),
+                      y=ins_train$Response,
+                      yname = "Response")
+
+library(tree)
+dtree=rpart(Response~.,data=data_train,cp=0.01)
+fancyRpartPlot(dtree,sub = NULL)
+```
+
+```{r}
+library(smotefamily)
+library(DMwR2)
+train$Response = as.factor(train$Response)
+
+train$Gender <- ifelse(train$Gender == "Male", 1, 0)
+train$Vehicle_Damage <- ifelse(train$Vehicle_Damage == "Yes", 1, 0)
+train$Vehicle_Age <- ifelse(train$Vehicle_Age == "> 2 Years", 2, ifelse(train$Vehicle_Age == "1-2 Year", 1, 0))
+X=train[,-ncol(train)]
+Y=train[,ncol(train)]
+set.seed(500)
+trainIndex=createDataPartition(Y,p=0.8,list = FALSE)
+X_train=X[trainIndex,]
+X_test=X[-trainIndex,]
+Y_train=Y[trainIndex]
+Y_test=Y[-trainIndex]
+trainSplit <- SMOTE(X_train,Y_train)
+
+```
+
+```{r}
+datanew=rbind(trainSplit$orig_N[,-12],trainSplit$orig_P[,-12])
+View(datanew)
+```
+
+##logistic
+
+```{r}
+
+ins_logreg_final <- glm(Response ~ Gender+Age+Driving_License+Previously_Insured
+                  +Vehicle_Age+Vehicle_Damage+Annual_Premium+Policy_Sales_Channel,family=binomial,data = data_train)
+summary(ins_logreg_final)
+testing_ins <- predict(ins_logreg_final, ins_test, type = "response")
+Y_hat_mod2 <- as.numeric(testing_ins > 0.25)
+table(ins_test$Response, Y_hat_mod2, dnn = c("Actual", "Predicted"))
+accuracy <- mean(Y_test == Y_hat_mod2)
+accuracy
+```
+```{r}
+library(pROC)
+par(pty ="s")
+auc_lm <- roc(Y_test,testing_ins, plot = TRUE, legacy.axes= TRUE, 
+    percent = TRUE, xlab = "False Positive %", ylab = "True Positive %", 
+    col="#377eb8", lwd=4, print.auc = TRUE)
+```
+
+##RF
+```{r}
+library(randomForest)
+data_train$Response <- as.factor(data_train$Response)
+ins_test$Response <- as.factor(ins_test$Response)
+set.seed(500)
+RF_Model = randomForest(Response~.,data=data_train,ntree=100)
+predicted_response = predict(RF_Model,ins_test)
+library(caret)
+library(corrplot)
+conf=confusionMatrix(predicted_response,ins_test$Response)
+ggplot(data = ins_test,aes(x=as.factor(Response),fill=predicted_response))+geom_bar()+scale_color_manual(values = c("seagreen","black"))+labs(x="Actual",y="Predicted",fill="Predicted")+theme_minimal()
+ins_test$predicted_response = predicted_response
+```
+
+
+```{r}
+CFM1 = table(ins_test$Response,predicted_response)
+CFM1
+Accuracy_Random_Forest = sum(diag(CFM1)/sum(CFM1))
+Accuracy_Random_Forest
+```
+
+```{r}
+auc_rf <- roc(Y_train,RF_Model$votes[,1], plot = TRUE, legacy.axes= TRUE, 
+    percent = TRUE, xlab = "False Positive %", ylab = "True Positive %", 
+    col="#4daf4a", lwd=4, print.auc = TRUE)
+```
+
+##DT
+
+```{r}
+asuransi_tree <- ctree(formula = Response ~ .,
+                       data = data_train,control=ctree_control(mincriterion=0.95,minsplit=30, minbucket=2))
+
+
+plot(asuransi_tree, type = "simple")
+```
+
+
+```{r}
+# Dự đoán
+dtree_class <- predict(asuransi_tree, ins_test, type = "response")
+
+table(dtree_class, ins_test$Response)
+accuracy <- mean(ins_test$Response == dtree_class)
+accuracy
+```
+```{r}
+Dtree_predprob <- predict(asuransi_tree, ins_test, type = "prob")
+
+
+Dtree_roc <- prediction(predictions = Dtree_predprob[,2],
+                        labels=as.numeric(ins_test$Response == "1"))
+
+
+Dtree_perf <- performance(prediction.obj = Dtree_roc,
+                    measure = "tpr", # tpr = true positive rate
+                    x.measure = "fpr") #fpr = false positive rate
+                    
+
+plot(Dtree_perf)
+abline(0,1, lty = 2)
+auc <- performance(prediction.obj = Dtree_roc, 
+                   measure = "auc")
+auc@y.values
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
